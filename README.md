@@ -16,8 +16,8 @@ Convert any multi-page Canva design (public view link) to a clean, multi-page PD
 ## Installation
 1. Clone this repo:
    ```bash
-   git clone <your-repo-url>
-   cd <repo-folder>
+   git clone https://github.com/yoh-space/Design2Pdf.git
+   cd src
    ```
 2. Create a virtual environment (optional but recommended):
    ```bash
