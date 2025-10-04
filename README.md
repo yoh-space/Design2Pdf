@@ -64,7 +64,7 @@ python canva_to_pdf.py <canva-view-url> [output.pdf]
 
 Example:
 ```bash
-python canva_to_pdf.py "https://www.canva.com/design/DAG0AX_bC4Q/q6-a02ts1GFmWJieNUElhA/view#1" my_design.pdf
+python3 canva_to_pdf.py "https://www.canva.com/design/DAG0AX_bC4Q/q6-a02ts1GFmWJieNUElhA/view#1" my_design.pdf
 ```
 
 ## How it works
