@@ -35,6 +35,26 @@ Convert any multi-page Canva design (public view link) to a clean, multi-page PD
    playwright install chromium
    ```
 
+### Managing the environment and dependencies
+
+- Always keep your virtual environment out of git. A `.gitignore` is included with `venv/` ignored by default.
+- Use `requirements.txt` to reproduce the runtime dependencies. To freeze your environment:
+  ```bash
+  pip freeze > requirements.txt
+  ```
+- If you need a reproducible environment across machines, consider using `pip-tools` or `poetry`.
+
+### Pushing to GitHub (quick tips)
+
+- Do NOT commit your `venv/` directory. If you accidentally committed it, remove it from the index and rewrite history:
+  ```bash
+  git rm -r --cached venv
+  git commit -m "Remove venv from repo"
+  git push origin main
+  ```
+- If the repository already contains large binaries exceeding GitHub limits (100MB), use `git-filter-repo` or `bfg` to purge them from history (see CONTRIBUTING section for steps).
+- Git LFS can store very large files but is **not** recommended for virtual environments or dependencies.
+
 ## Usage
 ```bash
 python canva_to_pdf.py <canva-view-url> [output.pdf]
