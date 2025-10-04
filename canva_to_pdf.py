@@ -4,14 +4,15 @@ from PyPDF2 import PdfMerger
 import os
 
 if len(sys.argv) < 2:
-    print("Usage: python canva_to_pdf.py <canva-view-url> [out.pdf]")
+    print("Usage: python canva_to_pdf.py <canva-view-url> [out.pdf] [--debug]")
     sys.exit(1)
 
 base_url = sys.argv[1].split("#")[0]  # strip any #1
-out = sys.argv[2] if len(sys.argv) > 2 else "out.pdf"
+out = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith('--') else "out.pdf"
+debug = '--debug' in sys.argv or '--no-headless' in sys.argv
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
+    browser = p.chromium.launch(headless=not debug)
     pdfs = []
     for i in range(1, 14):  # Pages 1 to 13
         url = f"{base_url}#{i}"
@@ -33,85 +34,153 @@ with sync_playwright() as p:
             except Exception:
                 page.wait_for_timeout(2000)
 
-            # Hide UI and isolate design (using raw string to fix SyntaxWarning)
+            # Find and isolate design using scoring heuristics
             dims = page.evaluate(r"""
             () => {
-              const hideAll = (sel) => Array.from(document.querySelectorAll(sel)).forEach(n => { try { n.style.setProperty('display','none','important'); } catch(e){} });
-
-              // Target known header/footer wrappers and controls
-              hideAll('div[class^="V5ZeDQ"]');
-              hideAll('div[class*="V5ZeDQ"]');
-              hideAll('div[aria-label="Design slider"]');
-              hideAll('div.kp6g_Q');
-              hideAll('div._8K36tA');
-              hideAll('div._7_nW9A');
-
-              // Hide obvious text UI (Canva, Share, page x of y)
-              Array.from(document.querySelectorAll('a, button, span, div')).forEach(el => {
-                try {
-                  const txt = (el.innerText || '').trim().toLowerCase();
-                  if (!txt) return;
-                  if (txt.includes('canva') || txt.includes('share') || /page \d+ of \d+/i.test(txt)) {
-                    el.style.setProperty('display','none','important');
-                  }
-                } catch(e) {}
-              });
-
-              // Heuristic: find the largest visible, non-fixed element inside body (likely the design canvas)
               const isVisible = (el) => {
                 try {
                   const st = window.getComputedStyle(el);
                   if (st.display === 'none' || st.visibility === 'hidden' || parseFloat(st.opacity) === 0) return false;
                   const r = el.getBoundingClientRect();
-                  if (r.width === 0 || r.height === 0) return false;
-                  return true;
-                } catch(e){ return false; }
+                  return r.width > 0 && r.height > 0;
+                } catch(e) { return false; }
               };
 
-              let best = null;
-              let bestArea = 0;
-              const all = Array.from(document.body.querySelectorAll('*'));
-              for (const el of all) {
-                if (!isVisible(el)) continue;
+              const scoreElement = (el) => {
                 try {
-                  const st = window.getComputedStyle(el);
-                  if (st.position === 'fixed' || st.position === 'sticky') continue;
                   const r = el.getBoundingClientRect();
-                  if (r.width < 50 || r.height < 50) continue;
-                  const area = r.width * r.height;
-                  if (area > bestArea) { bestArea = area; best = el; }
-                } catch(e) {}
-              }
-
-              if (best) {
-                // Hide all top-level body children except the ancestors of best so the document contains only the design
-                const ancestors = new Set();
-                let p = best;
-                while (p) { ancestors.add(p); p = p.parentElement; }
-                Array.from(document.body.children).forEach(ch => {
-                  if (!ancestors.has(ch)) {
-                    try { ch.style.setProperty('display','none','important'); } catch(e) {}
+                  const st = window.getComputedStyle(el);
+                  
+                  if (!isVisible(el) || st.position === 'fixed' || st.position === 'sticky') return -1;
+                  if (r.width * r.height < 2000) return -1;
+                  
+                  let score = r.width * r.height; // Base score: area
+                  
+                  // Bonus for image content
+                  const images = el.querySelectorAll('img, svg, canvas');
+                  score += images.length * 10000;
+                  
+                  // Penalty for UI patterns
+                  const className = el.className || '';
+                  if (className.includes('V5ZeDQ') || className.includes('_8K36tA') || className.includes('_7_nW9A')) {
+                    score *= 0.1;
                   }
-                });
+                  
+                  // Penalty for control elements
+                  const controls = el.querySelectorAll('button[aria-label*="Share"], button[aria-label*="Previous"], button[aria-label*="Next"], a[href*="canva.com"]');
+                  if (controls.length > 0) score *= 0.1;
+                  
+                  // Bonus for center position
+                  const centerX = r.left + r.width / 2;
+                  const centerY = r.top + r.height / 2;
+                  const distFromCenter = Math.sqrt(Math.pow(centerX - window.innerWidth/2, 2) + Math.pow(centerY - window.innerHeight/2, 2));
+                  score *= Math.max(0.5, 1 - distFromCenter / (window.innerWidth + window.innerHeight));
+                  
+                  return score;
+                } catch(e) { return -1; }
+              };
 
-                // Ensure best is cleanly positioned
-                try {
-                  best.style.setProperty('margin', '0', 'important');
-                  best.style.setProperty('position', 'relative', 'important');
-                  best.style.setProperty('top', '0', 'important');
-                  best.style.setProperty('left', '0', 'important');
-                } catch(e) {}
+              // Find best element
+              let best = null;
+              let bestScore = -1;
+              const candidates = Array.from(document.body.querySelectorAll('*'));
+              
+              for (const el of candidates) {
+                const score = scoreElement(el);
+                if (score > bestScore) {
+                  bestScore = score;
+                  best = el;
+                }
               }
 
-              // Return the page dimensions after isolation; fallback to document size if something goes wrong
-              return { w: document.documentElement.scrollWidth || document.body.scrollWidth || 1920, h: document.documentElement.scrollHeight || document.body.scrollHeight || 1080 };
+              let debug = { tag: 'none', score: 0, rect: {}, hasImages: false };
+              
+              if (best) {
+                const r = best.getBoundingClientRect();
+                const images = best.querySelectorAll('img, svg, canvas');
+                debug = {
+                  tag: best.tagName,
+                  id: best.id || '',
+                  classes: (best.className || '').split(' ').slice(0, 3).join(' '),
+                  score: bestScore,
+                  rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+                  hasImages: images.length > 0
+                };
+                
+                // Scroll into view and wait for images
+                best.scrollIntoView({ behavior: 'instant', block: 'start' });
+                
+                // Clone best element into clean document
+                const clone = best.cloneNode(true);
+                document.body.innerHTML = '';
+                document.body.appendChild(clone);
+                
+                // Reset positioning
+                clone.style.margin = '0';
+                clone.style.position = 'relative';
+                clone.style.top = '0';
+                clone.style.left = '0';
+                
+                // Wait for images in clone to load
+                const cloneImages = clone.querySelectorAll('img');
+                return new Promise(resolve => {
+                  let loaded = 0;
+                  const total = cloneImages.length;
+                  
+                  if (total === 0) {
+                    const finalR = clone.getBoundingClientRect();
+                    resolve({ 
+                      w: Math.min(Math.max(finalR.width, 800), 20000), 
+                      h: Math.min(Math.max(finalR.height, 600), 20000), 
+                      debug 
+                    });
+                    return;
+                  }
+                  
+                  const checkComplete = () => {
+                    loaded++;
+                    if (loaded >= total) {
+                      setTimeout(() => {
+                        const finalR = clone.getBoundingClientRect();
+                        resolve({ 
+                          w: Math.min(Math.max(finalR.width, 800), 20000), 
+                          h: Math.min(Math.max(finalR.height, 600), 20000), 
+                          debug 
+                        });
+                      }, 100);
+                    }
+                  };
+                  
+                  cloneImages.forEach(img => {
+                    if (img.complete) checkComplete();
+                    else {
+                      img.onload = checkComplete;
+                      img.onerror = checkComplete;
+                    }
+                  });
+                  
+                  // Fallback timeout
+                  setTimeout(() => {
+                    const finalR = clone.getBoundingClientRect();
+                    resolve({ 
+                      w: Math.min(Math.max(finalR.width, 800), 20000), 
+                      h: Math.min(Math.max(finalR.height, 600), 20000), 
+                      debug 
+                    });
+                  }, 3000);
+                });
+              }
+              
+              return { w: 1920, h: 1080, debug };
             }
             """)
 
-            page.wait_for_timeout(300)
-
-            full_width = dims.get('w') if isinstance(dims, dict) else dims['w']
-            full_height = dims.get('h') if isinstance(dims, dict) else dims['h']
+            full_width = dims['w']
+            full_height = dims['h']
+            
+            if debug:
+                d = dims['debug']
+                print(f"  Debug: {d['tag']} id='{d['id']}' classes='{d['classes']}' rect={d['rect']} images={d['hasImages']} score={d['score']:.0f}")
 
             tmp_pdf = f"tmp_page_{i}.pdf"
             page.pdf(
@@ -124,6 +193,18 @@ with sync_playwright() as p:
             
         except Exception as e:
             print(f"Error rendering page {i} ({url}): {e}")
+            # Try frame fallback if main page failed
+            try:
+                for frame in page.frames:
+                    if frame != page.main_frame:
+                        frame_dims = frame.evaluate(r"""() => ({ w: document.documentElement.scrollWidth || 800, h: document.documentElement.scrollHeight || 600 })""")
+                        if frame_dims['w'] > 400 and frame_dims['h'] > 300:
+                            tmp_pdf = f"tmp_page_{i}.pdf"
+                            page.pdf(path=tmp_pdf, width=f"{frame_dims['w']}px", height=f"{frame_dims['h']}px", print_background=True)
+                            pdfs.append(tmp_pdf)
+                            break
+            except:
+                pass
         finally:
             try:
                 page.close()
